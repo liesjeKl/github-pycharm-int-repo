@@ -309,43 +309,53 @@ class DNAViewerApp(QMainWindow):
             QMessageBox.warning(self, 'Error', 'Please search for a pattern first')
             return
 
-        # Clear previous plot
+            # Clear previous plot
         self.figure.clear()
 
-        # Create a new axis
-        ax = self.figure.add_subplot(111)
+        # Create subplots
+        ax1 = self.figure.add_subplot(211)  # Top plot: distribution histogram
+        ax2 = self.figure.add_subplot(212)  # Bottom plot: cumulative distribution
 
-        # Get sequence length
+        # Get sequence length and positions
         seq_len = len(self.current_sequence)
-
-        # Create a list of positions where motifs are found
         positions = [start for start, end in self.matches]
 
-        # Create a scatter plot of motif positions
-        ax.scatter(positions, [1] * len(positions), color='red', s=50, alpha=0.7,
-                   label=f"'{self.search_pattern}' motifs")
+        # Plot 1: Histogram of motif distribution
+        n_bins = min(20, max(5, seq_len // 100))  # Adaptive bin count
+        ax1.hist(positions, bins=n_bins, color='skyblue', edgecolor='black', alpha=0.7)
+        ax1.set_title(f'Distribution of "{self.search_pattern}" motifs in DNA sequence')
+        ax1.set_xlabel('Position in sequence')
+        ax1.set_ylabel('Frequency')
+        ax1.grid(True, alpha=0.3)
 
-        # Set plot title and labels
-        ax.set_title(f'Distribution of "{self.search_pattern}" motifs in DNA sequence')
-        ax.set_xlabel('Position in sequence')
-        ax.set_ylabel('Motif presence')
+        # Add vertical lines for each motif position
+        for pos in positions:
+            ax1.axvline(x=pos, color='red', linestyle='--', alpha=0.3, linewidth=0.5)
 
-        # Set y-axis limits and remove y-axis ticks
-        ax.set_ylim(0.5, 1.5)
-        ax.set_yticks([])
+        # Plot 2: Cumulative distribution
+        if len(positions) > 0:
+            sorted_positions = sorted(positions)
+            cumulative_counts = range(1, len(sorted_positions) + 1)
+            ax2.plot(sorted_positions, cumulative_counts, 'b-', linewidth=2, marker='o', markersize=3)
+            ax2.fill_between(sorted_positions, cumulative_counts, alpha=0.3, color='blue')
+        ax2.set_xlabel('Position in sequence')
+        ax2.set_ylabel('Cumulative Count')
+        ax2.set_title('Cumulative Distribution of Motifs')
+        ax2.grid(True, alpha=0.3)
 
-        # Add a grid for better readability
-        ax.grid(True, alpha=0.3)
+        # Add statistics text
+        stats_text = (
+            f'Total motifs: {len(self.matches)}\n'
+            f'Sequence length: {seq_len} bp\n'
+            f'Density: {len(self.matches) / seq_len * 1000:.2f} motifs/kb\n'
+            f'Mean spacing: {seq_len / len(self.matches):.1f} bp' if len(self.matches) > 0 else 'N/A'
+        )
 
-        # Add a legend
-        ax.legend(loc='upper right')
+        ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+                 fontsize=9)
 
-        # Add text with statistics
-        stats_text = f'Total motifs: {len(self.matches)}\nSequence length: {seq_len} bp'
-        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-        # Adjust layout to prevent clipping of labels
+        # Adjust layout to prevent clipping
         self.figure.tight_layout()
 
         # Refresh canvas
