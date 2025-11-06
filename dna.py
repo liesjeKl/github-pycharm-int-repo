@@ -10,6 +10,11 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from PyQt5.QtCore import Qt, QDateTime
 
+from PyQt5.QtGui import QTextDocument
+from PyQt5.QtPrintSupport import QPrinter
+import os
+from datetime import datetime
+
 
 class DNAViewerApp(QMainWindow):
     def __init__(self):
@@ -73,6 +78,12 @@ class DNAViewerApp(QMainWindow):
         self.save_button.clicked.connect(self.save_results_to_csv)
         self.save_button.setEnabled(False)  # Initially disabled
         search_layout.addWidget(self.save_button)
+
+        # Save to PDF button
+        self.pdf_button = QPushButton('Save Results to PDF')
+        self.pdf_button.clicked.connect(self.save_results_to_pdf)
+        self.pdf_button.setEnabled(False)  # Initially disabled
+        search_layout.addWidget(self.pdf_button)
 
         # Separator
         separator = QFrame()
@@ -232,6 +243,7 @@ class DNAViewerApp(QMainWindow):
         self.matches = matches
         self.search_pattern = search_pattern
         self.save_button.setEnabled(True)  # Enable save button
+        self.pdf_button.setEnabled(True)  # Enable PDF button
 
     def highlight_match(self, item):
         if not hasattr(self, 'matches') or not self.matches:
@@ -371,6 +383,7 @@ class DNAViewerApp(QMainWindow):
         self.sequence_display.setExtraSelections([])
         # Disable save button
         self.save_button.setEnabled(False)
+        self.pdf_button.setEnabled(False)
 
     def save_results_to_csv(self):
         if not hasattr(self, 'current_sequence'):
@@ -432,6 +445,139 @@ class DNAViewerApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, 'Error', f'Could not save file: {str(e)}')
 
+    def save_results_to_pdf(self):
+        if not hasattr(self, 'current_sequence'):
+            QMessageBox.warning(self, 'Error', 'Please load a DNA sequence first')
+            return
+
+        if not hasattr(self, 'matches') or not self.matches:
+            QMessageBox.warning(self, 'Error', 'Please search for a pattern first')
+            return
+
+        # Open file dialog to choose save location
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 'Save Results to PDF', '',
+            'PDF Files (*.pdf);;All Files (*)'
+        )
+
+        if not file_path:
+            return  # User cancelled
+
+        try:
+            # Create printer and set properties
+            printer = QPrinter(QPrinter.HighResolution)
+            printer.setOutputFormat(QPrinter.PdfFormat)
+            printer.setOutputFileName(file_path)
+            printer.setPageSize(QPrinter.A4)
+            printer.setFullPage(True)
+
+            # Create document
+            document = QTextDocument()
+
+            # Prepare HTML content
+            html_content = self.generate_pdf_content()
+            document.setHtml(html_content)
+
+            # Print to PDF
+            document.print_(printer)
+
+            QMessageBox.information(self, 'Success', f'Results saved to PDF: {file_path}')
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Could not save PDF: {str(e)}')
+
+    def generate_pdf_content(self):
+        """Generate HTML content for PDF report"""
+
+        # Save current plot to temporary image
+        plot_filename = "temp_plot.png"
+        self.figure.savefig(plot_filename, dpi=300, bbox_inches='tight')
+
+        # Get current date and time
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Generate matches table rows
+        matches_rows = ""
+        for i, (start, end) in enumerate(self.matches):
+            sequence_segment = self.current_sequence[start:end]
+            matches_rows += f"""
+            <tr>
+                <td>{i + 1}</td>
+                <td>{start}</td>
+                <td>{end - 1}</td>
+                <td>{sequence_segment}</td>
+            </tr>
+            """
+
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; }}
+                h2 {{ color: #34495e; }}
+                .header {{ background-color: #ecf0f1; padding: 15px; border-radius: 5px; }}
+                .section {{ margin: 20px 0; }}
+                table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+                th, td {{ border: 1px solid #bdc3c7; padding: 8px; text-align: left; }}
+                th {{ background-color: #3498db; color: white; }}
+                tr:nth-child(even) {{ background-color: #f2f2f2; }}
+                .stats {{ background-color: #e8f4f8; padding: 10px; border-radius: 5px; }}
+                .footer {{ margin-top: 30px; font-size: 12px; color: #7f8c8d; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>DNA Sequence Analysis Report</h1>
+                <p>Generated on: {current_time}</p>
+            </div>
+
+            <div class="section">
+                <h2>Sequence Information</h2>
+                <p><strong>Sequence ID:</strong> {self.id_display.toPlainText()}</p>
+                <p><strong>Sequence Length:</strong> {len(self.current_sequence)} bp</p>
+                <p><strong>Search Pattern:</strong> {self.search_pattern}</p>
+            </div>
+
+            <div class="section stats">
+                <h2>Analysis Statistics</h2>
+                <p><strong>Total Matches Found:</strong> {len(self.matches)}</p>
+                <p><strong>Motif Density:</strong> {len(self.matches) / len(self.current_sequence) * 1000:.2f} motifs/kb</p>
+                <p><strong>Sequence Coverage:</strong> {(sum(len(self.search_pattern) for _ in self.matches) / len(self.current_sequence) * 100):.2f}%</p>
+            </div>
+
+            <div class="section">
+                <h2>Motif Distribution Plot</h2>
+                <img src="{plot_filename}" width="100%" />
+            </div>
+
+            <div class="section">
+                <h2>Detailed Match Results</h2>
+                <table>
+                    <tr>
+                        <th>Match #</th>
+                        <th>Start Position</th>
+                        <th>End Position</th>
+                        <th>Sequence Segment</th>
+                    </tr>
+                    {matches_rows}
+                </table>
+            </div>
+
+            <div class="footer">
+                <p>Generated by DNA Sequence Viewer Application</p>
+            </div>
+        </body>
+        </html>
+        """
+
+        # Clean up temporary file
+        try:
+            os.remove(plot_filename)
+        except:
+            pass
+
+        return html
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
