@@ -8,8 +8,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTextEdit, QLabel,
                              QFileDialog, QMessageBox, QLineEdit, QGroupBox,
                              QListWidget, QSplitter, QFrame, QDialog, QSizePolicy,
-                             QProgressBar)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+                             QProgressBar, QScrollArea)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -20,6 +20,8 @@ from PyQt5.QtPrintSupport import QPrinter
 import os
 from datetime import datetime
 
+from PyQt5.QtGui import QPainter, QColor, QFont, QPen
+import math
 
 class NCBIDownloadThread(QThread):
     """Wątek do pobierania danych z NCBI w tle"""
@@ -49,14 +51,13 @@ class NCBIDownloadThread(QThread):
         except Exception as e:
             self.error.emit(f"Error downloading from NCBI: {str(e)}")
 
-
 class DNAViewerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('DNA Sequence Viewer with NCBI GenBank')
+        self.setWindowTitle('DNA Sequence Analyzer')
         self.setGeometry(100, 100, 1200, 700)
 
         # Central widget
@@ -118,6 +119,10 @@ class DNAViewerApp(QMainWindow):
         # Search group
         search_group = QGroupBox("Sequence Search")
         search_layout = QVBoxLayout(search_group)
+        self.viz_button = QPushButton('Interactive Visualization')
+        self.viz_button.clicked.connect(self.show_interactive_visualization)
+        self.viz_button.setEnabled(False)  # Initially disabled
+        search_layout.addWidget(self.viz_button)
 
         # Search input
         search_input_layout = QHBoxLayout()
@@ -383,6 +388,8 @@ class DNAViewerApp(QMainWindow):
         self.save_button.setEnabled(True)  # Enable save button
         self.pdf_button.setEnabled(True)  # Enable PDF button
 
+        self.viz_button.setEnabled(True)
+
     def highlight_match(self, item):
         if not hasattr(self, 'matches') or not self.matches:
             return
@@ -522,6 +529,8 @@ class DNAViewerApp(QMainWindow):
         # Disable save button
         self.save_button.setEnabled(False)
         self.pdf_button.setEnabled(False)
+
+        self.viz_button.setEnabled(False)
 
     def save_results_to_csv(self):
         if not hasattr(self, 'current_sequence'):
@@ -737,6 +746,182 @@ class DNAViewerApp(QMainWindow):
             pass
 
         return html
+
+    def show_interactive_visualization(self):
+        if not hasattr(self, 'current_sequence') or not hasattr(self, 'matches'):
+            QMessageBox.warning(self, 'Error', 'Please load and search a sequence first')
+            return
+
+        dialog = InteractiveVisualizationDialog(
+            self.current_sequence,
+            self.matches,
+            self.search_pattern,
+            self
+        )
+        dialog.exec_()
+
+class SequenceVisualizationWidget(QWidget):
+    def __init__(self, sequence, matches, search_pattern, parent=None):
+        super().__init__(parent)
+        self.sequence = sequence
+        self.matches = matches
+        self.search_pattern = search_pattern
+        self.zoom_level = 1.0
+        self.start_pos = 0
+        self.visible_bases = 100
+        self.setMinimumHeight(150)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Settings
+        width = self.width()
+        height = self.height()
+        base_width = 10 * self.zoom_level
+        visible_bases = min(len(self.sequence), int(width / base_width))
+
+        # Background
+        painter.fillRect(0, 0, width, height, QColor(240, 240, 240))
+
+        # Paint sequence
+        sequence_height = 30
+        y_pos = (height - sequence_height) // 2
+
+        # Paint axis line
+        painter.setPen(QPen(Qt.black, 2))
+        painter.drawLine(50, y_pos + sequence_height // 2, width - 50, y_pos + sequence_height // 2)
+
+        # Paint motif
+        for start, end in self.matches:
+            if start >= self.start_pos and start < self.start_pos + visible_bases:
+                x_start = 50 + (start - self.start_pos) * base_width
+                x_end = 50 + (end - self.start_pos) * base_width
+
+                # Set motif area
+                painter.fillRect(x_start, y_pos, x_end - x_start, sequence_height, QColor(255, 0, 0, 100))
+                painter.setPen(QPen(Qt.red, 1))
+                painter.drawRect(x_start, y_pos, x_end - x_start, sequence_height)
+
+        # Paint motif tags
+        font = QFont()
+        font.setPointSize(8)
+        painter.setFont(font)
+        painter.setPen(QPen(Qt.black, 1))
+
+        step = max(1, visible_bases // 10)  # every 10% of visible range
+        for i in range(0, visible_bases, step):
+            pos = self.start_pos + i
+            if pos < len(self.sequence):
+                x_pos = 50 + i * base_width
+                painter.drawLine(x_pos, y_pos + sequence_height // 2 - 5, x_pos, y_pos + sequence_height // 2 + 5)
+                painter.drawText(x_pos - 10, y_pos + sequence_height + 15, 20, 10, Qt.AlignCenter, str(pos))
+
+        # Legend
+        painter.setPen(QPen(Qt.black, 1))
+        legend_y = 20
+        painter.drawText(60, legend_y, f"Sequence: {len(self.sequence)} bp | Found motifs: {len(self.matches)} | Pattern: {self.search_pattern}")
+        # Actual Visible range
+        painter.drawText(60, legend_y + 15, f"Visible range: {self.start_pos}-{self.start_pos + visible_bases}")
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() > 0:
+            self.zoom_level = min(3.0, self.zoom_level * 1.1)
+        else:
+            self.zoom_level = max(0.1, self.zoom_level / 1.1)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.last_mouse_pos = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if hasattr(self, 'last_mouse_pos'):
+            delta = event.pos().x() - self.last_mouse_pos.x()
+            base_width = 10 * self.zoom_level
+            scroll_amount = int(-delta / base_width)
+            self.start_pos = max(0, min(len(self.sequence) - self.visible_bases, self.start_pos + scroll_amount))
+            self.last_mouse_pos = event.pos()
+            self.update()
+
+class InteractiveVisualizationDialog(QDialog):
+    def __init__(self, sequence, matches, search_pattern, parent=None):
+        super().__init__(parent)
+        self.sequence = sequence
+        self.matches = matches
+        self.search_pattern = search_pattern
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle(f"Interactive visualization with highlighted motifs on the sequence axis: {self.search_pattern}")
+        self.setGeometry(200, 200, 1000, 400)
+
+        layout = QVBoxLayout(self)
+
+        # Header
+        header_layout = QHBoxLayout()
+        header_label = QLabel(
+            f"Motif Distribution Visualization '{self.search_pattern}' in sequence ({len(self.sequence)} bp)")
+        header_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_layout.addWidget(header_label)
+        header_layout.addStretch()
+
+        # Control buttons
+        self.zoom_in_btn = QPushButton("+")
+        self.zoom_out_btn = QPushButton("-")
+        self.reset_btn = QPushButton("Reset view")
+
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        self.reset_btn.clicked.connect(self.reset_view)
+
+        header_layout.addWidget(self.zoom_out_btn)
+        header_layout.addWidget(self.zoom_in_btn)
+        header_layout.addWidget(self.reset_btn)
+
+        layout.addLayout(header_layout)
+
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(separator)
+
+        # Scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.viz_widget = SequenceVisualizationWidget(self.sequence, self.matches, self.search_pattern)
+        scroll_area.setWidget(self.viz_widget)
+
+        layout.addWidget(scroll_area)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.accept)
+
+        button_layout.addStretch()
+        button_layout.addWidget(self.close_btn)
+
+        layout.addLayout(button_layout)
+
+    def zoom_in(self):
+        self.viz_widget.zoom_level = min(3.0, self.viz_widget.zoom_level * 1.2)
+        self.viz_widget.update()
+
+    def zoom_out(self):
+        self.viz_widget.zoom_level = max(0.1, self.viz_widget.zoom_level / 1.2)
+        self.viz_widget.update()
+
+    def reset_view(self):
+        self.viz_widget.zoom_level = 1.0
+        self.viz_widget.start_pos = 0
+        self.viz_widget.update()
 
 
 if __name__ == '__main__':
