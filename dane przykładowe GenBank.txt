@@ -1,0 +1,7 @@
+Przykładowe Accession ID do testów:
+
+NM_001301717.1 - ludzki gen
+
+NC_000913.3 - genom E. coli
+
+NM_001126.2 - inny ludzki gen
