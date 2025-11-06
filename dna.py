@@ -1,10 +1,15 @@
 import sys
+import requests
+from Bio import Entrez
+from Bio import SeqIO
+import io
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTextEdit, QLabel,
                              QFileDialog, QMessageBox, QLineEdit, QGroupBox,
-                             QListWidget, QSplitter, QFrame, QDialog, QSizePolicy)
-from PyQt5.QtCore import Qt
+                             QListWidget, QSplitter, QFrame, QDialog, QSizePolicy,
+                             QProgressBar)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -16,13 +21,42 @@ import os
 from datetime import datetime
 
 
+class NCBIDownloadThread(QThread):
+    """Wątek do pobierania danych z NCBI w tle"""
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, accession_id, email):
+        super().__init__()
+        self.accession_id = accession_id
+        self.email = email
+
+    def run(self):
+        try:
+            self.progress.emit("Connecting to NCBI...")
+            Entrez.email = self.email
+
+            self.progress.emit(f"Downloading sequence: {self.accession_id}")
+            # Pobieranie sekwencji w formacie FASTA
+            handle = Entrez.efetch(db="nucleotide", id=self.accession_id, rettype="fasta", retmode="text")
+            fasta_data = handle.read()
+            handle.close()
+
+            self.progress.emit("Processing data...")
+            self.finished.emit(fasta_data)
+
+        except Exception as e:
+            self.error.emit(f"Error downloading from NCBI: {str(e)}")
+
+
 class DNAViewerApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.initUI()
 
     def initUI(self):
-        self.setWindowTitle('DNA Sequence Viewer')
+        self.setWindowTitle('DNA Sequence Viewer with NCBI GenBank')
         self.setGeometry(100, 100, 1200, 700)
 
         # Central widget
@@ -36,10 +70,50 @@ class DNAViewerApp(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
 
-        # Load button
-        self.load_button = QPushButton('Load DNA Sequence')
-        self.load_button.clicked.connect(self.load_dna_data)
-        left_layout.addWidget(self.load_button)
+        # Load buttons
+        load_buttons_layout = QHBoxLayout()
+        self.load_file_button = QPushButton('Load from File')
+        self.load_file_button.clicked.connect(self.load_dna_data)
+        self.load_ncbi_button = QPushButton('Load from NCBI')
+        self.load_ncbi_button.clicked.connect(self.load_from_ncbi)
+        load_buttons_layout.addWidget(self.load_file_button)
+        load_buttons_layout.addWidget(self.load_ncbi_button)
+        left_layout.addLayout(load_buttons_layout)
+
+        # NCBI Download section
+        ncbi_group = QGroupBox("NCBI GenBank Download")
+        ncbi_layout = QVBoxLayout(ncbi_group)
+
+        # Accession ID input
+        accession_layout = QHBoxLayout()
+        accession_label = QLabel('Accession ID:')
+        self.accession_input = QLineEdit()
+        self.accession_input.setPlaceholderText('e.g., NM_001301717.1')
+        self.accession_input.setText('NM_001301717.1')  # Przykładowy ID
+        accession_layout.addWidget(accession_label)
+        accession_layout.addWidget(self.accession_input)
+        ncbi_layout.addLayout(accession_layout)
+
+        # Email input (required for NCBI)
+        email_layout = QHBoxLayout()
+        email_label = QLabel('Email:')
+        self.email_input = QLineEdit()
+        self.email_input.setPlaceholderText('your.email@example.com')
+        self.email_input.setText('your.email@example.com')
+        email_layout.addWidget(email_label)
+        email_layout.addWidget(self.email_input)
+        ncbi_layout.addLayout(email_layout)
+
+        # Progress bar for NCBI download
+        self.ncbi_progress = QProgressBar()
+        self.ncbi_progress.setVisible(False)
+        ncbi_layout.addWidget(self.ncbi_progress)
+
+        # Progress label
+        self.ncbi_progress_label = QLabel('')
+        ncbi_layout.addWidget(self.ncbi_progress_label)
+
+        left_layout.addWidget(ncbi_group)
 
         # Search group
         search_group = QGroupBox("Sequence Search")
@@ -170,34 +244,98 @@ class DNAViewerApp(QMainWindow):
                 with open(file_path, 'r') as file:
                     content = file.read().strip()
 
-                # Parse the content (simple FASTA format assumption)
-                lines = content.split('\n')
-
-                if len(lines) > 0:
-                    # First line is typically the ID line (starts with '>')
-                    if lines[0].startswith('>'):
-                        sequence_id = lines[0][1:].strip()  # Remove '>' and trim
-                        sequence = ''.join(lines[1:]).replace(' ', '').upper()
-                    else:
-                        # If no '>', treat first line as ID and rest as sequence
-                        sequence_id = lines[0].strip()
-                        sequence = ''.join(lines[1:]).replace(' ', '').upper()
-
-                    # Display the data
-                    self.id_display.setText(sequence_id)
-                    self.sequence_display.setText(sequence)
-                    self.current_sequence = sequence
-                    self.clear_search_results()
-
-                    # Clear the plot when new data is loaded
-                    self.figure.clear()
-                    self.canvas.draw()
-
-                else:
-                    QMessageBox.warning(self, 'Error', 'File is empty')
+                self.parse_sequence_content(content, f"File: {os.path.basename(file_path)}")
 
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Could not read file: {str(e)}')
+
+    def load_from_ncbi(self):
+        """Load sequence from NCBI GenBank using accession ID"""
+        accession_id = self.accession_input.text().strip()
+        email = self.email_input.text().strip()
+
+        if not accession_id:
+            QMessageBox.warning(self, 'Error', 'Please enter an accession ID')
+            return
+
+        if not email or '@' not in email:
+            QMessageBox.warning(self, 'Error', 'Please enter a valid email address')
+            return
+
+        # Disable button during download
+        self.load_ncbi_button.setEnabled(False)
+        self.ncbi_progress.setVisible(True)
+        self.ncbi_progress_label.setText('Starting download...')
+
+        # Create and start download thread
+        self.ncbi_thread = NCBIDownloadThread(accession_id, email)
+        self.ncbi_thread.finished.connect(self.on_ncbi_download_finished)
+        self.ncbi_thread.error.connect(self.on_ncbi_download_error)
+        self.ncbi_thread.progress.connect(self.on_ncbi_progress)
+        self.ncbi_thread.start()
+
+    def on_ncbi_progress(self, message):
+        """Update progress during NCBI download"""
+        self.ncbi_progress_label.setText(message)
+
+    def on_ncbi_download_finished(self, fasta_data):
+        """Handle successful NCBI download"""
+        try:
+            self.parse_sequence_content(fasta_data, f"NCBI: {self.accession_input.text()}")
+            self.ncbi_progress_label.setText('Download completed successfully!')
+            QMessageBox.information(self, 'Success', 'Sequence downloaded successfully from NCBI GenBank')
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Error processing NCBI data: {str(e)}')
+        finally:
+            self.load_ncbi_button.setEnabled(True)
+            self.ncbi_progress.setVisible(False)
+
+    def on_ncbi_download_error(self, error_message):
+        """Handle NCBI download error"""
+        QMessageBox.critical(self, 'Error', error_message)
+        self.load_ncbi_button.setEnabled(True)
+        self.ncbi_progress.setVisible(False)
+        self.ncbi_progress_label.setText('')
+
+    def parse_sequence_content(self, content, source_info):
+        """Parse sequence content from either file or NCBI data"""
+        lines = content.split('\n')
+
+        if len(lines) > 0:
+            # First line is typically the ID line (starts with '>')
+            if lines[0].startswith('>'):
+                sequence_id = lines[0][1:].strip()  # Remove '>' and trim
+                sequence = ''.join(lines[1:]).replace(' ', '').upper()
+                # Add source info to ID
+                sequence_id = f"{sequence_id} | {source_info}"
+            else:
+                # If no '>', treat first line as ID and rest as sequence
+                sequence_id = lines[0].strip()
+                sequence = ''.join(lines[1:]).replace(' ', '').upper()
+                sequence_id = f"{sequence_id} | {source_info}"
+
+            # Validate DNA sequence
+            if not self.validate_dna_sequence(sequence):
+                QMessageBox.warning(self, 'Warning',
+                                    'Sequence contains non-DNA characters. Only A, T, C, G will be processed.')
+
+            # Display the data
+            self.id_display.setText(sequence_id)
+            self.sequence_display.setText(sequence)
+            self.current_sequence = sequence
+            self.clear_search_results()
+
+            # Clear the plot when new data is loaded
+            self.figure.clear()
+            self.canvas.draw()
+
+        else:
+            QMessageBox.warning(self, 'Error', 'No data found')
+
+    def validate_dna_sequence(self, sequence):
+        """Validate if sequence contains only DNA characters"""
+        valid_bases = {'A', 'T', 'C', 'G', 'N', ' '}
+        return all(base.upper() in valid_bases for base in sequence)
 
     def search_sequence(self):
         if not hasattr(self, 'current_sequence'):
@@ -509,6 +647,12 @@ class DNAViewerApp(QMainWindow):
             </tr>
             """
 
+        # Generate additional statistics for the report
+        seq_len = len(self.current_sequence)
+        motif_density = len(self.matches) / seq_len * 1000 if seq_len > 0 else 0
+        sequence_coverage = (sum(len(self.search_pattern) for _ in self.matches) / seq_len * 100) if seq_len > 0 else 0
+        mean_spacing = seq_len / len(self.matches) if len(self.matches) > 0 else 0
+
         html = f"""
         <html>
         <head>
@@ -524,6 +668,8 @@ class DNAViewerApp(QMainWindow):
                 tr:nth-child(even) {{ background-color: #f2f2f2; }}
                 .stats {{ background-color: #e8f4f8; padding: 10px; border-radius: 5px; }}
                 .footer {{ margin-top: 30px; font-size: 12px; color: #7f8c8d; }}
+                .plot-container {{ text-align: center; margin: 20px 0; }}
+                .plot-image {{ max-width: 100%; height: auto; border: 1px solid #ddd; }}
             </style>
         </head>
         <body>
@@ -535,20 +681,26 @@ class DNAViewerApp(QMainWindow):
             <div class="section">
                 <h2>Sequence Information</h2>
                 <p><strong>Sequence ID:</strong> {self.id_display.toPlainText()}</p>
-                <p><strong>Sequence Length:</strong> {len(self.current_sequence)} bp</p>
+                <p><strong>Sequence Length:</strong> {seq_len} bp</p>
                 <p><strong>Search Pattern:</strong> {self.search_pattern}</p>
+                <p><strong>Pattern Length:</strong> {len(self.search_pattern)} bp</p>
             </div>
 
             <div class="section stats">
                 <h2>Analysis Statistics</h2>
                 <p><strong>Total Matches Found:</strong> {len(self.matches)}</p>
-                <p><strong>Motif Density:</strong> {len(self.matches) / len(self.current_sequence) * 1000:.2f} motifs/kb</p>
-                <p><strong>Sequence Coverage:</strong> {(sum(len(self.search_pattern) for _ in self.matches) / len(self.current_sequence) * 100):.2f}%</p>
+                <p><strong>Motif Density:</strong> {motif_density:.2f} motifs/kb</p>
+                <p><strong>Sequence Coverage:</strong> {sequence_coverage:.2f}%</p>
+                <p><strong>Mean Spacing:</strong> {mean_spacing:.1f} bp</p>
+                <p><strong>GC Content of Pattern:</strong> {(self.search_pattern.count('G') + self.search_pattern.count('C')) / len(self.search_pattern) * 100:.1f}%</p>
             </div>
 
             <div class="section">
-                <h2>Motif Distribution Plot</h2>
-                <img src="{plot_filename}" width="100%" />
+                <h2>Motif Distribution Analysis</h2>
+                <div class="plot-container">
+                    <img src="{plot_filename}" class="plot-image" alt="Motif Distribution Plot" />
+                    <p><em>Figure 1: Distribution of '{self.search_pattern}' motifs in the DNA sequence. Top: Frequency distribution histogram. Bottom: Cumulative distribution of motif positions.</em></p>
+                </div>
             </div>
 
             <div class="section">
@@ -564,8 +716,15 @@ class DNAViewerApp(QMainWindow):
                 </table>
             </div>
 
+            <div class="section">
+                <h2>Position Data</h2>
+                <p><strong>Motif Positions:</strong> {', '.join(str(start) for start, end in self.matches[:10])}{'...' if len(self.matches) > 10 else ''}</p>
+                <p><strong>Total positions analyzed:</strong> {seq_len} bp</p>
+            </div>
+
             <div class="footer">
                 <p>Generated by DNA Sequence Viewer Application</p>
+                <p>Total matches: {len(self.matches)} | Sequence length: {seq_len} bp | Pattern: {self.search_pattern}</p>
             </div>
         </body>
         </html>
@@ -578,6 +737,7 @@ class DNAViewerApp(QMainWindow):
             pass
 
         return html
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
