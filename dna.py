@@ -1,0 +1,430 @@
+import sys
+
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QPushButton, QTextEdit, QLabel,
+                             QFileDialog, QMessageBox, QLineEdit, QGroupBox,
+                             QListWidget, QSplitter, QFrame, QDialog, QSizePolicy)
+from PyQt5.QtCore import Qt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from PyQt5.QtCore import Qt, QDateTime
+
+
+class DNAViewerApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle('DNA Sequence Viewer')
+        self.setGeometry(100, 100, 1200, 700)
+
+        # Central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        # Main layout
+        main_layout = QHBoxLayout(central_widget)
+
+        # Left panel for controls
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+
+        # Load button
+        self.load_button = QPushButton('Load DNA Sequence')
+        self.load_button.clicked.connect(self.load_dna_data)
+        left_layout.addWidget(self.load_button)
+
+        # Search group
+        search_group = QGroupBox("Sequence Search")
+        search_layout = QVBoxLayout(search_group)
+
+        # Search input
+        search_input_layout = QHBoxLayout()
+        search_label = QLabel('Search pattern:')
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText('Enter DNA sequence (e.g., ATGC)')
+        search_button = QPushButton('Search')
+        search_button.clicked.connect(self.search_sequence)
+        search_input_layout.addWidget(search_label)
+        search_input_layout.addWidget(self.search_input)
+        search_input_layout.addWidget(search_button)
+        search_layout.addLayout(search_input_layout)
+
+        # Count button and display
+        count_layout = QHBoxLayout()
+        count_button = QPushButton('Count Occurrences')
+        count_button.clicked.connect(self.count_occurrences)
+        self.count_result = QLabel('Count: 0')
+        self.count_result.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 5px; border: 1px solid #ccc; }")
+        count_layout.addWidget(count_button)
+        count_layout.addWidget(self.count_result)
+        count_layout.addStretch()
+        search_layout.addLayout(count_layout)
+
+        # Plot button
+        plot_button = QPushButton('Plot Motif Distribution')
+        plot_button.clicked.connect(self.plot_motif_distribution)
+        search_layout.addWidget(plot_button)
+
+        # Save results button
+        self.save_button = QPushButton('Save Results to CSV')
+        self.save_button.clicked.connect(self.save_results_to_csv)
+        self.save_button.setEnabled(False)  # Initially disabled
+        search_layout.addWidget(self.save_button)
+
+        # Separator
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        search_layout.addWidget(separator)
+
+        # Search results
+        results_label = QLabel('Search results:')
+        search_layout.addWidget(results_label)
+
+        self.results_list = QListWidget()
+        self.results_list.itemClicked.connect(self.highlight_match)
+        search_layout.addWidget(self.results_list)
+
+        left_layout.addWidget(search_group)
+        left_layout.addStretch()
+
+        # Right panel for data display
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        # Sequence ID display
+        id_label = QLabel('Sequence ID:')
+        right_layout.addWidget(id_label)
+
+        self.id_display = QTextEdit()
+        self.id_display.setMaximumHeight(50)
+        self.id_display.setReadOnly(True)
+        right_layout.addWidget(self.id_display)
+
+        # Sequence display
+        sequence_label = QLabel('DNA Sequence:')
+        right_layout.addWidget(sequence_label)
+
+        self.sequence_display = QTextEdit()
+        self.sequence_display.setReadOnly(True)
+        self.sequence_display.setMaximumHeight(100)  # Zmniejszona wysokość
+        right_layout.addWidget(self.sequence_display)
+
+        # Splitter to allow resizing between sequence and plot
+        splitter = QSplitter(Qt.Vertical)
+
+        # Create a container for the plot with proper size policy
+        plot_container = QWidget()
+        plot_layout = QVBoxLayout(plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Plot label
+        plot_label = QLabel('Motif Distribution:')
+        plot_layout.addWidget(plot_label)
+
+        # Create matplotlib figure and canvas
+        self.figure = Figure()
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas)
+
+        # Add widgets to splitter
+        splitter.addWidget(self.sequence_display)
+        splitter.addWidget(plot_container)
+
+        # Set initial sizes (sequence display takes 30%, plot takes 70%)
+        splitter.setSizes([100, 500])
+
+        right_layout.addWidget(splitter)
+
+        # Add panels to main layout
+        main_layout.addWidget(left_panel, 1)
+        main_layout.addWidget(right_panel, 3)
+
+    def load_dna_data(self):
+        # Open file dialog to select DNA sequence file
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 'Open DNA Sequence File', '',
+            'Text Files (*.txt);;FASTA Files (*.fasta *.fa);;All Files (*)'
+        )
+
+        if file_path:
+            try:
+                with open(file_path, 'r') as file:
+                    content = file.read().strip()
+
+                # Parse the content (simple FASTA format assumption)
+                lines = content.split('\n')
+
+                if len(lines) > 0:
+                    # First line is typically the ID line (starts with '>')
+                    if lines[0].startswith('>'):
+                        sequence_id = lines[0][1:].strip()  # Remove '>' and trim
+                        sequence = ''.join(lines[1:]).replace(' ', '').upper()
+                    else:
+                        # If no '>', treat first line as ID and rest as sequence
+                        sequence_id = lines[0].strip()
+                        sequence = ''.join(lines[1:]).replace(' ', '').upper()
+
+                    # Display the data
+                    self.id_display.setText(sequence_id)
+                    self.sequence_display.setText(sequence)
+                    self.current_sequence = sequence
+                    self.clear_search_results()
+
+                    # Clear the plot when new data is loaded
+                    self.figure.clear()
+                    self.canvas.draw()
+
+                else:
+                    QMessageBox.warning(self, 'Error', 'File is empty')
+
+            except Exception as e:
+                QMessageBox.critical(self, 'Error', f'Could not read file: {str(e)}')
+
+    def search_sequence(self):
+        if not hasattr(self, 'current_sequence'):
+            QMessageBox.warning(self, 'Error', 'Please load a DNA sequence first')
+            return
+
+        search_pattern = self.search_input.text().strip().upper()
+
+        if not search_pattern:
+            QMessageBox.warning(self, 'Error', 'Please enter a search pattern')
+            return
+
+        # Validate DNA sequence (only A, T, C, G characters)
+        valid_bases = {'A', 'T', 'C', 'G'}
+        if not all(base in valid_bases for base in search_pattern):
+            QMessageBox.warning(self, 'Error', 'Invalid DNA sequence. Only A, T, C, G characters are allowed.')
+            return
+
+        # Perform search
+        sequence = self.current_sequence
+        matches = []
+
+        # Find all occurrences
+        start = 0
+        while True:
+            pos = sequence.find(search_pattern, start)
+            if pos == -1:
+                break
+            matches.append((pos, pos + len(search_pattern)))
+            start = pos + 1
+
+        # Display results
+        self.results_list.clear()
+
+        if not matches:
+            self.results_list.addItem('No matches found')
+            self.save_button.setEnabled(False)  # Disable save if no matches
+            return
+
+        for i, (start, end) in enumerate(matches):
+            self.results_list.addItem(f'Match {i + 1}: Position {start}-{end - 1}')
+
+        self.matches = matches
+        self.search_pattern = search_pattern
+        self.save_button.setEnabled(True)  # Enable save button
+
+    def highlight_match(self, item):
+        if not hasattr(self, 'matches') or not self.matches:
+            return
+
+        # Get the selected match index
+        try:
+            index = self.results_list.row(item)
+            if index >= len(self.matches):
+                return
+
+            start, end = self.matches[index]
+
+            # Highlight the match in the sequence display
+            cursor = self.sequence_display.textCursor()
+
+            # Set selection
+            cursor.setPosition(0)
+            cursor.movePosition(cursor.Right, cursor.MoveAnchor, start)
+            cursor.movePosition(cursor.Right, cursor.KeepAnchor, end - start)
+
+            self.sequence_display.setTextCursor(cursor)
+            self.sequence_display.setFocus()
+
+            # Apply highlighting (optional - you can customize this)
+            extra_selections = []
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format.setBackground(Qt.yellow)
+            selection.format.setProperty(QTextEdit.FullWidthSelection, True)
+            extra_selections.append(selection)
+
+            self.sequence_display.setExtraSelections(extra_selections)
+
+        except Exception as e:
+            print(f"Error highlighting match: {e}")
+
+    def count_occurrences(self):
+        if not hasattr(self, 'current_sequence'):
+            QMessageBox.warning(self, 'Error', 'Please load a DNA sequence first')
+            return
+
+        search_pattern = self.search_input.text().strip().upper()
+
+        if not search_pattern:
+            QMessageBox.warning(self, 'Error', 'Please enter a search pattern')
+            return
+
+        # Validate DNA sequence (only A, T, C, G characters)
+        valid_bases = {'A', 'T', 'C', 'G'}
+        if not all(base in valid_bases for base in search_pattern):
+            QMessageBox.warning(self, 'Error', 'Invalid DNA sequence. Only A, T, C, G characters are allowed.')
+            return
+
+        # Count occurrences
+        sequence = self.current_sequence
+        count = sequence.count(search_pattern)
+
+        # Update count display
+        self.count_result.setText(f'Count: {count}')
+
+        # Also perform search to update results list
+        self.search_sequence()
+
+        # Show message with count result
+        QMessageBox.information(self, 'Count Result',
+                                f'The pattern "{search_pattern}" appears {count} times in the sequence.')
+
+    def plot_motif_distribution(self):
+        if not hasattr(self, 'current_sequence'):
+            QMessageBox.warning(self, 'Error', 'Please load a DNA sequence first')
+            return
+
+        if not hasattr(self, 'matches') or not self.matches:
+            QMessageBox.warning(self, 'Error', 'Please search for a pattern first')
+            return
+
+        # Clear previous plot
+        self.figure.clear()
+
+        # Create a new axis
+        ax = self.figure.add_subplot(111)
+
+        # Get sequence length
+        seq_len = len(self.current_sequence)
+
+        # Create a list of positions where motifs are found
+        positions = [start for start, end in self.matches]
+
+        # Create a scatter plot of motif positions
+        ax.scatter(positions, [1] * len(positions), color='red', s=50, alpha=0.7,
+                   label=f"'{self.search_pattern}' motifs")
+
+        # Set plot title and labels
+        ax.set_title(f'Distribution of "{self.search_pattern}" motifs in DNA sequence')
+        ax.set_xlabel('Position in sequence')
+        ax.set_ylabel('Motif presence')
+
+        # Set y-axis limits and remove y-axis ticks
+        ax.set_ylim(0.5, 1.5)
+        ax.set_yticks([])
+
+        # Add a grid for better readability
+        ax.grid(True, alpha=0.3)
+
+        # Add a legend
+        ax.legend(loc='upper right')
+
+        # Add text with statistics
+        stats_text = f'Total motifs: {len(self.matches)}\nSequence length: {seq_len} bp'
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        # Adjust layout to prevent clipping of labels
+        self.figure.tight_layout()
+
+        # Refresh canvas
+        self.canvas.draw()
+
+    def clear_search_results(self):
+        self.results_list.clear()
+        if hasattr(self, 'matches'):
+            del self.matches
+        if hasattr(self, 'search_pattern'):
+            del self.search_pattern
+        # Clear any highlighting
+        self.sequence_display.setExtraSelections([])
+        # Disable save button
+        self.save_button.setEnabled(False)
+
+    def save_results_to_csv(self):
+        if not hasattr(self, 'current_sequence'):
+            QMessageBox.warning(self, 'Error', 'Please load a DNA sequence first')
+            return
+
+        if not hasattr(self, 'matches') or not self.matches:
+            QMessageBox.warning(self, 'Error', 'Please search for a pattern first')
+            return
+
+        # Open file dialog to choose save location
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, 'Save Results to CSV', '',
+            'CSV Files (*.csv);;All Files (*)'
+        )
+
+        if not file_path:
+            return  # User cancelled
+
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+                import csv
+                writer = csv.writer(csvfile)
+
+                # Write header
+                writer.writerow(['DNA Sequence Analysis Results'])
+                writer.writerow([])
+
+                # Write sequence info
+                writer.writerow(['Sequence ID:', self.id_display.toPlainText()])
+                writer.writerow(['Sequence Length:', len(self.current_sequence)])
+                writer.writerow(['Search Pattern:', self.search_pattern])
+                writer.writerow(['Total Matches:', len(self.matches)])
+                writer.writerow([])
+
+                # Write matches table header
+                writer.writerow(['Match #', 'Start Position', 'End Position', 'Sequence Segment'])
+
+                # Write each match with sequence context
+                for i, (start, end) in enumerate(self.matches):
+                    # Get the matched sequence segment
+                    sequence_segment = self.current_sequence[start:end]
+                    writer.writerow([i + 1, start, end - 1, sequence_segment])
+
+                writer.writerow([])
+
+                # Write distribution data for plotting
+                writer.writerow(['Position Distribution Data'])
+                writer.writerow(['Position', 'Motif Presence'])
+                positions = [start for start, end in self.matches]
+                for pos in positions:
+                    writer.writerow([pos, 1])
+
+                writer.writerow([])
+                writer.writerow(['Generated on:', QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')])
+
+            QMessageBox.information(self, 'Success', f'Results saved to {file_path}')
+
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Could not save file: {str(e)}')
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = DNAViewerApp()
+    window.show()
+    sys.exit(app.exec_())
